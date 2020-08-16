@@ -30,11 +30,10 @@ class ClassNet(SegNet):
         batch_size = x.shape[0]
         out = []
         for i in range(self.num_layers_conv):
+            # residual block >>
             feature = self.contracting_path['doubleconv-{0}'.format(i)](
                 x if i == 0 else pre)
-            feature += self.contracting_path['shortcut-{0}'.format(i)](
-                x if i == 0 else pre)
-            feature = nn.ReLU(inplace=True)(feature)
+            # residual block <<
             out.append(feature)
             if i != self.num_layers_conv - 1:
                 pre = self.maxpool(out[i])

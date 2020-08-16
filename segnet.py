@@ -14,6 +14,70 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class SEBlock(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SEBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+
+class BasicBlock(nn.Module):
+    def __init__(self, in_c, out_c, reduction=16):
+        super(BasicBlock, self).__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, dilation=1),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_c, out_c, kernel_size=3, padding=1, dilation=1),
+            nn.BatchNorm2d(out_c),
+            # nn.ReLU(inplace=True),
+        )
+        self.se = SEBlock(out_c, reduction)
+        self.downsample = nn.Sequential(
+            nn.Conv2d(in_c, out_c, kernel_size=1, padding=0, dilation=1),
+            nn.BatchNorm2d(out_c),
+            # nn.ReLU(inplace=True),
+        )
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        residual = x
+        x = self.double_conv(x)
+        x = self.se(x)
+        if self.downsample is not None:
+            residual = self.downsample(residual)
+        x += residual
+        x = self.relu(x)
+        return x
+
+
+class MultiBlock(nn.Module):
+    def __init__(self, in_c, out_c, reduction=16, num=1):
+        super(MultiBlock, self).__init__()
+        self.block = nn.ModuleList()
+        for i in range(num):
+            if i == 0:
+                self.block.append(BasicBlock(in_c, out_c, reduction))
+            else:
+                self.block.append(BasicBlock(out_c, out_c, reduction))
+
+    def forward(self, x):
+        for i in range(len(self.block)):
+            x = self.block[i](x)
+        return x
+
+
 class SegNet(nn.Module):
     def double_conv(self, in_c, out_c):
         return nn.Sequential(
@@ -92,21 +156,16 @@ class SegNet(nn.Module):
         self.contracting_path = nn.ModuleDict({})
         self.expansive_path = nn.ModuleDict({})
         for i in range(self.num_layers_conv):
-            self.contracting_path['doubleconv-{0}'.format(i)] = self.double_conv(input_size[0] if i == 0 else self.out_channels[i-1],
-                                                                                 self.out_channels[i])
-            self.contracting_path['shortcut-{0}'.format(i)] = self.shortcut(input_size[0] if i == 0 else self.out_channels[i-1],
-                                                                            self.out_channels[i])
+            self.contracting_path['doubleconv-{0}'.format(i)] = MultiBlock(input_size[0] if i == 0 else self.out_channels[i-1],
+                                                                           self.out_channels[i], num=1)
 
             if i != self.num_layers_conv - 1:
                 self.expansive_path['upconv-{0}'.format(self.num_layers_conv - 2 - i)] = \
                     self.upconv(self.out_channels[i + 1],
                                 self.out_channels[i])
                 self.expansive_path['doubleconv-{0}'.format(self.num_layers_conv - 2 - i)] = \
-                    self.double_conv(self.out_channels[i] * 2,
-                                     self.out_channels[i])
-                self.expansive_path['shortcut-{0}'.format(self.num_layers_conv - 2 - i)] = \
-                    self.shortcut(self.out_channels[i] * 2,
-                                  self.out_channels[i])
+                    MultiBlock(self.out_channels[i] * 2,
+                               self.out_channels[i], num=1)
 
         self.num_classes = output_size
         self.conv_1x1 = nn.Conv2d(
@@ -123,9 +182,6 @@ class SegNet(nn.Module):
             # residual block >>
             feature = self.contracting_path['doubleconv-{0}'.format(i)](
                 x if i == 0 else pre)
-            feature += self.contracting_path['shortcut-{0}'.format(i)](
-                x if i == 0 else pre)
-            feature = nn.ReLU(inplace=True)(feature)
             # residual block <<
             out.append(feature)
             if i != self.num_layers_conv - 1:
@@ -136,9 +192,7 @@ class SegNet(nn.Module):
                 out[-1] if i == 0 else x)
             x = torch.cat([out[-2 - i], self.pad(out[-2 - i], x)], 1)
             # residual block >>
-            y = self.expansive_path['doubleconv-{0}'.format(i)](x)
-            x = self.expansive_path['shortcut-{0}'.format(i)](x) + y
-            x = nn.ReLU(inplace=True)(x)
+            x = self.expansive_path['doubleconv-{0}'.format(i)](x)
             # residual block <<
         x = self.conv_1x1(x)
         return x
