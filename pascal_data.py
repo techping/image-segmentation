@@ -35,25 +35,69 @@ class PascalVOCAug(Dataset):
         self.preprocess = transforms.Compose([
             # transforms.Resize(512),
             # transforms.ToPILImage(),
-            transforms.Resize((size, size)),
+            # transforms.Resize((size, size)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                  std=[0.229, 0.224, 0.225])
         ])
 
         self.mask_preprocess = transforms.Compose([
-            transforms.ToPILImage(),
-            transforms.Resize(
-                (int(size * output_stride), int(size * output_stride)), interpolation=Image.NEAREST),
-            transforms.Lambda(lambda x: np.array(x)),
+            # transforms.ToPILImage(),
+            # transforms.Resize(
+            #     (int(size * output_stride), int(size * output_stride)), interpolation=Image.NEAREST),
+            # transforms.Lambda(lambda x: np.array(x)),
             transforms.Lambda(lambda x: torch.from_numpy(x).unsqueeze(0))
         ])
+
+        self.size = size
+        self.output_stride = output_stride
+        self.phase = phase
 
     def __getitem__(self, index):
         image_path = self.dataset_path + self.data[index][0]
         mask_path = self.dataset_path + self.data[index][1]
-        image = Image.open(image_path)
+        # image = Image.open(image_path)
+        image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         mask = cv2.imread(mask_path, 0)
+
+        image = cv2.resize(image, (self.size, self.size))
+        mask = cv2.resize(mask, (int(self.size * self.output_stride),
+                                 int(self.size * self.output_stride)), interpolation=cv2.INTER_NEAREST)
+
+        # data augmentation
+        if self.phase == 'train' and np.random.rand() < 0.5:
+            # randomly scale
+            factor = np.random.rand() * 1.5 + 0.5  # [0.5, 2.0]
+            w, h = mask.shape
+            new_w = int(w * factor)
+            new_h = int(h * factor)
+            diff_w = (new_w - w) // 2
+            diff_h = (new_h - h) // 2
+            diff_w = -diff_w if diff_w < 0 else diff_w
+            diff_h = -diff_h if diff_h < 0 else diff_h
+            image = cv2.resize(image, (new_w, new_h))
+            mask = cv2.resize(mask, (new_w, new_h),
+                              interpolation=cv2.INTER_NEAREST)
+            # print(f'scale {factor}, diff {(diff_w, diff_h)}, new {(new_w, new_h)}')
+            if new_w <= w:
+                # scale and pad
+                image = np.pad(image, ((diff_w, w - new_w - diff_w), (diff_h, h - new_h - diff_h),
+                                       (0, 0)), 'constant', constant_values=0)
+                mask = np.pad(mask, ((diff_w, w - new_w - diff_w), (diff_h, h - new_h - diff_h)),
+                              'constant', constant_values=255)
+            else:
+                # scale and crop
+                image = image[diff_w:-(new_w - w - diff_w),
+                              diff_h:-(new_h - h - diff_h), :]
+                mask = mask[diff_w:-(new_w - w - diff_w),
+                            diff_h:-(new_h - h - diff_h)]
+
+        if self.phase == 'train' and np.random.rand() < 0.5:
+            # randomly left-right filpping
+            image = cv2.flip(image, 1)
+            mask = cv2.flip(mask, 1)
+
         return [
             self.preprocess(image),  # torch.from_numpy(image),
             self.mask_preprocess(mask),  # torch.from_numpy(mask)
@@ -127,7 +171,8 @@ def get_augdata(dataset_path, size=512, output_stride=1.0, batch_size=1):
 
 
 if __name__ == '__main__':
-    data = PascalVOCAug(dataset_path, train_path, output_stride=1/8)
+    data = PascalVOCAug(
+        '/m2/shared/ziping/pascal_voc_seg/VOCdevkit/VOC2012', train_path, output_stride=1)
 
     d = data.__getitem__(500)
     print(type(d[0]))
@@ -138,6 +183,6 @@ if __name__ == '__main__':
     plt.imshow(d[0].numpy().transpose((1, 2, 0)))
     plt.savefig('1.jpg')
     plt.figure()
-    plt.imshow(d[1].numpy().reshape((64, 64)))
+    plt.imshow(d[1].numpy().reshape((512, 512)))
     plt.savefig('2.png')
     print(set(d[1].numpy().reshape((-1,))))
