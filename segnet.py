@@ -33,7 +33,7 @@ class SEBlock(nn.Module):
 
 
 class BasicBlock(nn.Module):
-    def __init__(self, in_c, out_c, reduction=16):
+    def __init__(self, in_c, out_c, downsample=True, reduction=16):
         super(BasicBlock, self).__init__()
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_c, out_c, kernel_size=3, padding=1, dilation=1),
@@ -44,11 +44,14 @@ class BasicBlock(nn.Module):
             # nn.ReLU(inplace=True),
         )
         self.se = SEBlock(out_c, reduction)
-        self.downsample = nn.Sequential(
-            nn.Conv2d(in_c, out_c, kernel_size=1, padding=0, dilation=1),
-            nn.BatchNorm2d(out_c),
-            # nn.ReLU(inplace=True),
-        )
+        if downsample:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_c, out_c, kernel_size=1, padding=0, dilation=1),
+                nn.BatchNorm2d(out_c),
+                # nn.ReLU(inplace=True),
+            )
+        else:
+            self.downsample = None
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
@@ -62,15 +65,77 @@ class BasicBlock(nn.Module):
         return x
 
 
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, dilation=1, padding=0, stride=1, bias=True):
+        super(DepthwiseSeparableConv, self).__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size,
+                                   padding=padding, stride=stride, dilation=dilation, groups=in_channels, bias=bias)
+        self.pointwise = nn.Conv2d(
+            in_channels, out_channels, kernel_size=1, bias=bias)
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return x
+
+
+class MBConvBlock(nn.Module):
+    # MBConv6
+    def __init__(self, in_c, out_c, downsample=True, reduction=16):
+        super(MBConvBlock, self).__init__()
+
+        self.conv_1x1_pre = nn.Sequential(
+            nn.Conv2d(in_c, 6 * in_c, 1, padding=0),
+            nn.BatchNorm2d(6 * in_c),
+            nn.ReLU(inplace=True)
+        )
+
+        self.dwconv = nn.Sequential(
+            nn.Conv2d(6 * in_c, 6 * in_c, kernel_size=3,
+                      padding=1, groups=6 * in_c),
+            nn.BatchNorm2d(6 * in_c),
+            nn.ReLU(inplace=True)
+        )
+
+        self.se = SEBlock(6 * in_c, reduction)
+
+        self.conv_1x1_post = nn.Sequential(
+            nn.Conv2d(in_c * 6, out_c, 1, padding=0),
+            nn.BatchNorm2d(out_c)
+        )
+
+        if downsample:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_c, out_c, 1, padding=0),
+                nn.BatchNorm2d(out_c)
+            )
+        else:
+            self.downsample = None
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        residual = x
+        x = self.conv_1x1_pre(x)
+        x = self.dwconv(x)
+        x = self.se(x)
+        x = self.conv_1x1_post(x)
+        if self.downsample is not None:
+            residual = self.downsample(residual)
+        x += residual
+        x = self.relu(x)
+        return x
+
+
 class MultiBlock(nn.Module):
     def __init__(self, in_c, out_c, reduction=16, num=1):
         super(MultiBlock, self).__init__()
         self.block = nn.ModuleList()
         for i in range(num):
             if i == 0:
-                self.block.append(BasicBlock(in_c, out_c, reduction))
+                self.block.append(MBConvBlock(
+                    in_c, out_c, reduction=reduction))
             else:
-                self.block.append(BasicBlock(out_c, out_c, reduction))
+                self.block.append(MBConvBlock(out_c, out_c, False, reduction))
 
     def forward(self, x):
         for i in range(len(self.block)):
